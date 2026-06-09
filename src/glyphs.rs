@@ -72,30 +72,24 @@ impl GlyphCache {
         }
 
         let image = image_fn();
-        let mut rect = self
+        let rect = self
             .color_atlas
             .add_region(image.data.data(), image.width, image.height);
-        if rect.is_none() {
-            // The packer is geometrically full and there is no per-image
-            // eviction; the only way to reclaim space is a full recycle. (vger
-            // already does this at >0.7 area usage, but wide images cap usage
-            // around 0.5 and never trip that threshold, so without this they
-            // would silently fail to pack and draw nothing — see rustspek's
-            // streaming/large-image case.) Clear and repack into the fresh
-            // atlas. The current image still draws this frame; any glyphs
-            // packed earlier are re-rasterized on the next paint.
-            self.clear();
-            rect = self
-                .color_atlas
-                .add_region(image.data.data(), image.width, image.height);
-        }
         let info = AtlasInfo {
             rect,
             left: 0,
             top: 0,
             colored: true,
         };
-        self.img_infos.insert(hash.to_vec(), info);
+        // Don't cache a failed pack. The packer is geometrically full and there
+        // is no per-image eviction; wide/large images cap area-usage well below
+        // the 0.7 clear threshold, so without help they'd never reclaim space.
+        // `add_region` flags the atlas as overflowed; `check_usage` recycles it
+        // at the start of the next frame (before any draws, so nothing already
+        // painted is corrupted), and this image is retried — and packed — then.
+        if rect.is_some() {
+            self.img_infos.insert(hash.to_vec(), info);
+        }
 
         info
     }
@@ -127,8 +121,11 @@ impl GlyphCache {
             colored: true,
         };
 
-        let svg_infos = self.svg_infos.get_mut(hash).unwrap();
-        svg_infos.insert((width, height), info);
+        // Don't cache a failed pack (see `get_image_mask`); retry after recycle.
+        if rect.is_some() {
+            let svg_infos = self.svg_infos.get_mut(hash).unwrap();
+            svg_infos.insert((width, height), info);
+        }
 
         info
     }
@@ -166,7 +163,10 @@ impl GlyphCache {
             top: image.top,
             colored: image.colored,
         };
-        self.glyph_infos.insert(key, info);
+        // Don't cache a failed pack (see `get_image_mask`); retry after recycle.
+        if rect.is_some() {
+            self.glyph_infos.insert(key, info);
+        }
         info
     }
 
@@ -176,6 +176,15 @@ impl GlyphCache {
     }
 
     pub fn check_usage(&mut self, device: &wgpu::Device) -> bool {
+        // If an atlas failed to pack a region during the previous frame, recycle
+        // it now — at the start of this frame, before any draws — so the retry
+        // packs cleanly and nothing already painted is corrupted. Needed because
+        // wide/large images cap area-usage below the 0.7 threshold handled below
+        // and so would otherwise never reclaim space.
+        if self.mask_atlas.overflowed() || self.color_atlas.overflowed() {
+            self.clear();
+            return false;
+        }
         let max_seen = (self.mask_atlas.max_seen as f32 * 2.0)
             .max(self.color_atlas.max_seen as f32 * 2.0) as u32;
         if max_seen > self.size {

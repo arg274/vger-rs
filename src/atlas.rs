@@ -21,6 +21,9 @@ pub struct Atlas {
     pub atlas_texture: wgpu::Texture,
     area_used: i32,
     did_clear: bool,
+    /// Set when a region failed to pack (atlas full); reset on `clear()`.
+    /// `GlyphCache::check_usage` reads this to recycle the atlas next frame.
+    overflowed: bool,
     content: AtlasContent,
 }
 
@@ -70,6 +73,7 @@ impl Atlas {
             atlas_texture,
             area_used: 0,
             did_clear: false,
+            overflowed: false,
             content,
         }
     }
@@ -126,8 +130,14 @@ impl Atlas {
 
             Some(rect)
         } else {
+            self.overflowed = true;
             None
         }
+    }
+
+    /// Whether a region failed to pack since the last `clear()`.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     pub fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
@@ -250,5 +260,6 @@ impl Atlas {
         self.area_used = 0;
         self.new_data.clear();
         self.did_clear = true;
+        self.overflowed = false;
     }
 }
