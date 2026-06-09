@@ -1,7 +1,7 @@
 use crate::atlas::{Atlas, AtlasContent};
 use linebender_resource_handle::Blob;
 use rect_packer::Rect;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Copy, Clone, Debug)]
 pub struct AtlasInfo {
@@ -51,6 +51,9 @@ pub struct GlyphCache {
     >,
     svg_infos: HashMap<Vec<u8>, HashMap<(u32, u32), AtlasInfo>>,
     img_infos: HashMap<Vec<u8>, AtlasInfo>,
+    /// Image hashes in insertion order, so the oldest same-size region can be
+    /// recycled in place when the atlas is full (see `reuse_image_region`).
+    img_order: VecDeque<Vec<u8>>,
 }
 
 impl GlyphCache {
@@ -63,6 +66,7 @@ impl GlyphCache {
             glyph_infos: HashMap::new(),
             img_infos: HashMap::new(),
             svg_infos: HashMap::new(),
+            img_order: VecDeque::new(),
         }
     }
 
@@ -72,26 +76,56 @@ impl GlyphCache {
         }
 
         let image = image_fn();
-        let rect = self
+        let mut rect = self
             .color_atlas
             .add_region(image.data.data(), image.width, image.height);
+        if rect.is_none() {
+            // Atlas packer is full. Streaming re-uploads identical-size images
+            // every frame, so reuse the oldest cached image region of the same
+            // size: overwrite its pixels in place. No growth, no full clear —
+            // other images keep their slots, so nothing flickers. (`add_region`
+            // set the overflow flag; clear it on success so `check_usage`
+            // doesn't recycle the atlas next frame.)
+            rect = self.reuse_image_region(image.width, image.height, image.data.data());
+            if rect.is_some() {
+                self.color_atlas.reset_overflow();
+            }
+            // If reuse failed (no same-size region — e.g. a new image size), the
+            // overflow flag stands and `check_usage` recycles before the next
+            // frame's draws, so nothing already painted is corrupted.
+        }
         let info = AtlasInfo {
             rect,
             left: 0,
             top: 0,
             colored: true,
         };
-        // Don't cache a failed pack. The packer is geometrically full and there
-        // is no per-image eviction; wide/large images cap area-usage well below
-        // the 0.7 clear threshold, so without help they'd never reclaim space.
-        // `add_region` flags the atlas as overflowed; `check_usage` recycles it
-        // at the start of the next frame (before any draws, so nothing already
-        // painted is corrupted), and this image is retried — and packed — then.
         if rect.is_some() {
             self.img_infos.insert(hash.to_vec(), info);
+            self.img_order.push_back(hash.to_vec());
         }
 
         info
+    }
+
+    /// Reuse the oldest cached image region whose packed size matches `(w, h)`,
+    /// overwriting its pixels with `data` and returning its rect; `None` if no
+    /// region of that size exists. Lets same-size streaming frames recycle the
+    /// previous generation's regions instead of overflowing the atlas.
+    fn reuse_image_region(&mut self, w: u32, h: u32, data: &[u8]) -> Option<Rect> {
+        let mut pos = None;
+        for (i, hsh) in self.img_order.iter().enumerate() {
+            if let Some(r) = self.img_infos.get(hsh).and_then(|info| info.rect) {
+                if r.width as u32 == w && r.height as u32 == h {
+                    pos = Some(i);
+                    break;
+                }
+            }
+        }
+        let old_hash = self.img_order.remove(pos?)?;
+        let rect = self.img_infos.remove(&old_hash)?.rect?;
+        self.color_atlas.overwrite_region(rect, data);
+        Some(rect)
     }
 
     pub fn get_svg_mask(
@@ -210,5 +244,6 @@ impl GlyphCache {
         self.glyph_infos.clear();
         self.svg_infos.clear();
         self.img_infos.clear();
+        self.img_order.clear();
     }
 }

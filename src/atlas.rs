@@ -140,6 +140,22 @@ impl Atlas {
         self.overflowed
     }
 
+    /// Clear the overflow flag. Called after a failed pack was resolved another
+    /// way (e.g. by reusing an existing region) so it doesn't trigger a recycle.
+    pub fn reset_overflow(&mut self) {
+        self.overflowed = false;
+    }
+
+    /// Queue pixel data to overwrite an already-allocated region in place,
+    /// without repacking. Used to recycle a same-size region for a new image so
+    /// streaming re-uploads don't accumulate regions and overflow the atlas.
+    pub fn overwrite_region(&mut self, rect: Rect, data: &[u8]) {
+        self.new_data.push(ImageData {
+            rect,
+            data: data.into(),
+        });
+    }
+
     pub fn update(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         if self.did_clear {
             // encoder.clear_texture(&self.atlas_texture, &wgpu::ImageSubresourceRange::default());
