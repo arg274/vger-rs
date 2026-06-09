@@ -72,9 +72,23 @@ impl GlyphCache {
         }
 
         let image = image_fn();
-        let rect = self
+        let mut rect = self
             .color_atlas
             .add_region(image.data.data(), image.width, image.height);
+        if rect.is_none() {
+            // The packer is geometrically full and there is no per-image
+            // eviction; the only way to reclaim space is a full recycle. (vger
+            // already does this at >0.7 area usage, but wide images cap usage
+            // around 0.5 and never trip that threshold, so without this they
+            // would silently fail to pack and draw nothing — see rustspek's
+            // streaming/large-image case.) Clear and repack into the fresh
+            // atlas. The current image still draws this frame; any glyphs
+            // packed earlier are re-rasterized on the next paint.
+            self.clear();
+            rect = self
+                .color_atlas
+                .add_region(image.data.data(), image.width, image.height);
+        }
         let info = AtlasInfo {
             rect,
             left: 0,
