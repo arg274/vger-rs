@@ -176,23 +176,26 @@ impl GlyphCache {
     }
 
     pub fn check_usage(&mut self, device: &wgpu::Device) -> bool {
-        // If an atlas failed to pack a region during the previous frame, recycle
-        // it now — at the start of this frame, before any draws — so the retry
-        // packs cleanly and nothing already painted is corrupted. Needed because
-        // wide/large images cap area-usage below the 0.7 threshold handled below
-        // and so would otherwise never reclaim space.
-        if self.mask_atlas.overflowed() || self.color_atlas.overflowed() {
-            self.clear();
-            return false;
-        }
         let max_seen = (self.mask_atlas.max_seen as f32 * 2.0)
             .max(self.color_atlas.max_seen as f32 * 2.0) as u32;
         if max_seen > self.size {
+            // A region larger than the current atlas appeared (set even when the
+            // pack failed): grow to fit. Must take priority over the overflow
+            // recycle below, otherwise an image too big for the current atlas
+            // would clear-and-retry forever at the same size and never fit.
             self.size = max_seen;
             self.mask_atlas.resize(device, self.size, self.size);
             self.color_atlas.resize(device, self.size, self.size);
             self.clear();
             true
+        } else if self.mask_atlas.overflowed() || self.color_atlas.overflowed() {
+            // Atlas is big enough but the packer filled up last frame; recycle
+            // now — at the start of this frame, before any draws — so the retry
+            // packs cleanly and nothing already painted is corrupted. Needed
+            // because wide/large images cap area-usage below the 0.7 threshold
+            // handled below and so would otherwise never reclaim space.
+            self.clear();
+            false
         } else if self.mask_atlas.usage() > 0.7 || self.color_atlas.usage() > 0.7 {
             self.clear();
             false
